@@ -439,17 +439,34 @@ void LibraryActivity::render(RenderLock&&) {
           }
 
           if (!coverTemplatePath.empty()) {
-            std::string coverBmpPath = UITheme::getCoverThumbPath(coverTemplatePath, 240);
+            const int thumbnailHeight = coverHeight;
+
+            std::string coverBmpPath = UITheme::getCoverThumbPath(coverTemplatePath, thumbnailHeight);
 
             if (!Storage.exists(coverBmpPath.c_str())) {
               if (epub.load(false, true)) {
-                epub.generateThumbBmp(240);
+                epub.generateThumbBmp(thumbnailHeight);
               }
             }
 
             if (Storage.openFileForRead("LIB", coverBmpPath, fileObj)) {
               if (bitmap.parseHeaders() == BmpReaderError::Ok) {
-                renderer.drawBitmap(bitmap, bookCoverX, coverY, bookCoverWidth, coverHeight);
+                const int bitmapWidth = bitmap.getWidth();
+                const int bitmapHeight = bitmap.getHeight();
+
+                int renderedWidth = bitmapWidth;
+
+                if (bitmapHeight > 0 && bitmapHeight != coverHeight) {
+                  renderedWidth = static_cast<int>(static_cast<float>(bitmapWidth) * static_cast<float>(coverHeight) /
+                                                   static_cast<float>(bitmapHeight));
+                }
+
+                renderedWidth = std::min(renderedWidth, coverWidth);
+
+                const int renderedX = coverX + (coverWidth - renderedWidth) / 2;
+
+                renderer.drawBitmap(bitmap, renderedX, coverY, renderedWidth, coverHeight);
+
                 renderedCover = true;
               }
             }
@@ -463,7 +480,22 @@ void LibraryActivity::render(RenderLock&&) {
 
               if (Storage.openFileForRead("LIB", homeCoverBmpPath, fallbackFileObj)) {
                 if (fallbackBitmap.parseHeaders() == BmpReaderError::Ok) {
-                  renderer.drawBitmap(fallbackBitmap, bookCoverX, coverY, bookCoverWidth, coverHeight);
+                  const int fallbackWidth = fallbackBitmap.getWidth();
+                  const int fallbackHeight = fallbackBitmap.getHeight();
+
+                  int renderedFallbackWidth = fallbackWidth;
+
+                  if (fallbackHeight > 0 && fallbackHeight != coverHeight) {
+                    renderedFallbackWidth =
+                        static_cast<int>(static_cast<float>(fallbackWidth) * static_cast<float>(coverHeight) /
+                                         static_cast<float>(fallbackHeight));
+                  }
+
+                  renderedFallbackWidth = std::min(renderedFallbackWidth, coverWidth);
+
+                  const int fallbackX = coverX + (coverWidth - renderedFallbackWidth) / 2;
+
+                  renderer.drawBitmap(fallbackBitmap, fallbackX, coverY, renderedFallbackWidth, coverHeight);
                   renderedCover = true;
                 }
               }
