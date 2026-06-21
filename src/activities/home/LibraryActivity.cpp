@@ -391,7 +391,7 @@ void LibraryActivity::render(RenderLock&&) {
 
       renderer.clearScreen();
 
-      const char* loadingMessage = "Indexing folder covers...";
+      const char* loadingMessage = tr(STR_INDEXING_FOLDER_COVERS);
 
       const int messageWidth = renderer.getTextWidth(UI_10_FONT_ID, loadingMessage);
 
@@ -469,9 +469,9 @@ void LibraryActivity::render(RenderLock&&) {
         const auto folderEpubs = getFolderEpubs(folderPath, 3, folderBookCount);
 
         if (folderBookCount == 1) {
-          displayAuthor = "1 livro";
+          displayAuthor = std::to_string(folderBookCount) + " " + std::string(tr(STR_BOOK));
         } else {
-          displayAuthor = std::to_string(folderBookCount) + " livros";
+          displayAuthor = std::to_string(folderBookCount) + " " + std::string(tr(STR_BOOKS));
         }
 
         const int coverCount = static_cast<int>(folderEpubs.size());
@@ -504,14 +504,12 @@ void LibraryActivity::render(RenderLock&&) {
           const int depth = coverCount - 1 - coverIndex;
           const int currentHeight = previewHeight - depth * verticalOffset;
 
-          // Todas as capas usam a mesma dimensão de cache.
-          // O redimensionamento para a pilha é feito apenas ao desenhar.
-          const int sourceThumbnailHeight = coverHeight;
-
-          const std::string coverBmpPath = UITheme::getCoverThumbPath(coverTemplatePath, sourceThumbnailHeight);
+          // Gerar cada capa diretamente no tamanho em que será apresentada.
+          // Evita redimensionar novamente uma imagem já convertida para 1-bit.
+          const std::string coverBmpPath = UITheme::getCoverThumbPath(coverTemplatePath, currentHeight);
 
           if (!Storage.exists(coverBmpPath.c_str())) {
-            folderEpub.generateThumbBmp(sourceThumbnailHeight);
+            folderEpub.generateThumbBmp(currentHeight);
           }
 
           FsFile folderCoverFile;
@@ -532,8 +530,12 @@ void LibraryActivity::render(RenderLock&&) {
             continue;
           }
 
-          int renderedWidth = static_cast<int>(static_cast<float>(bitmapWidth) * static_cast<float>(currentHeight) /
-                                               static_cast<float>(bitmapHeight));
+          int renderedWidth = bitmapWidth;
+
+          if (bitmapHeight != currentHeight && bitmapHeight > 0) {
+            renderedWidth = static_cast<int>(static_cast<float>(bitmapWidth) * static_cast<float>(currentHeight) /
+                                             static_cast<float>(bitmapHeight));
+          }
 
           renderedWidth = std::min(renderedWidth, previewWidth);
 
