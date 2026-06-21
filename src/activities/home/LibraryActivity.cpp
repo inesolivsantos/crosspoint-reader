@@ -296,8 +296,10 @@ static std::string getFileExtension(std::string filename) {
   return filename.substr(pos);
 }
 
-static std::vector<std::string> getFolderEpubs(const std::string& folderPath, size_t limit = 3) {
+static std::vector<std::string> getFolderEpubs(const std::string& folderPath, size_t limit, size_t& totalCount) {
   std::vector<std::string> epubPaths;
+
+  totalCount = 0;
 
   auto folder = Storage.open(folderPath.c_str());
 
@@ -309,7 +311,7 @@ static std::vector<std::string> getFolderEpubs(const std::string& folderPath, si
 
   char name[500];
 
-  for (auto file = folder.openNextFile(); file && epubPaths.size() < limit; file = folder.openNextFile()) {
+  for (auto file = folder.openNextFile(); file; file = folder.openNextFile()) {
     if (file.isDirectory()) {
       continue;
     }
@@ -328,8 +330,12 @@ static std::vector<std::string> getFolderEpubs(const std::string& folderPath, si
       fullPath += "/";
     }
 
-    fullPath += filename;
-    epubPaths.push_back(fullPath);
+    totalCount++;
+
+    if (epubPaths.size() < limit) {
+      fullPath += filename;
+      epubPaths.push_back(fullPath);
+    }
   }
 
   folder.close();
@@ -459,7 +465,14 @@ void LibraryActivity::render(RenderLock&&) {
 
         folderPath += file.substr(0, file.length() - 1);
 
-        const auto folderEpubs = getFolderEpubs(folderPath, 3);
+        size_t folderBookCount = 0;
+        const auto folderEpubs = getFolderEpubs(folderPath, 3, folderBookCount);
+
+        if (folderBookCount == 1) {
+          displayAuthor = "1 livro";
+        } else {
+          displayAuthor = std::to_string(folderBookCount) + " livros";
+        }
 
         const int coverCount = static_cast<int>(folderEpubs.size());
         const int horizontalOffset = 26;
