@@ -77,6 +77,7 @@ void LibraryActivity::onEnter() {
 
   selectorIndex = 0;
   pageIndex = 0;
+  folderCoverLoadingShown = false;
 
   // If Confirm was held while this activity opened, ignore its release.
   lockNextConfirmRelease = mappedInput.isPressed(MappedInputManager::Button::Confirm);
@@ -295,6 +296,46 @@ static std::string getFileExtension(std::string filename) {
   return filename.substr(pos);
 }
 
+static std::vector<std::string> getFolderEpubs(const std::string& folderPath, size_t limit = 3) {
+  std::vector<std::string> epubPaths;
+
+  auto folder = Storage.open(folderPath.c_str());
+
+  if (!folder || !folder.isDirectory()) {
+    return epubPaths;
+  }
+
+  folder.rewindDirectory();
+
+  char name[500];
+
+  for (auto file = folder.openNextFile(); file && epubPaths.size() < limit; file = folder.openNextFile()) {
+    if (file.isDirectory()) {
+      continue;
+    }
+
+    file.getName(name, sizeof(name));
+
+    std::string filename{name};
+
+    if (!FsHelpers::hasEpubExtension(filename)) {
+      continue;
+    }
+
+    std::string fullPath = folderPath;
+
+    if (fullPath.back() != '/') {
+      fullPath += "/";
+    }
+
+    fullPath += filename;
+    epubPaths.push_back(fullPath);
+  }
+
+  folder.close();
+  return epubPaths;
+}
+
 void LibraryActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
@@ -330,6 +371,38 @@ void LibraryActivity::render(RenderLock&&) {
     const size_t startIndex = pageIndex * maxVisible;
     const size_t endIndex = std::min(files.size(), startIndex + maxVisible);
 
+    bool visiblePageHasFolder = false;
+
+    for (size_t i = startIndex; i < endIndex; i++) {
+      if (!files[i].empty() && files[i].back() == '/') {
+        visiblePageHasFolder = true;
+        break;
+      }
+    }
+
+    if (!folderCoverLoadingShown && visiblePageHasFolder) {
+      folderCoverLoadingShown = true;
+
+      renderer.clearScreen();
+
+      const char* loadingMessage = "Indexing folder covers...";
+
+      const int messageWidth = renderer.getTextWidth(UI_10_FONT_ID, loadingMessage);
+
+      const int messageX = (pageWidth - messageWidth) / 2;
+      const int messageY = pageHeight / 2;
+
+      renderer.drawText(UI_10_FONT_ID, messageX, messageY, loadingMessage);
+
+      renderer.displayBuffer();
+
+      // Preparar novamente o buffer para o desenho normal da biblioteca.
+      renderer.clearScreen();
+
+      GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.headerHeight}, folderName.c_str());
+    }
+
+    // Este é o ciclo normal que já existia.
     for (size_t i = startIndex; i < endIndex; i++) {
       size_t localIndex = i - startIndex;
 
@@ -364,27 +437,122 @@ void LibraryActivity::render(RenderLock&&) {
       std::string displayAuthor = "";
 
       if (selected) {
-        renderer.drawRect(bookCoverX - 2, coverY - 2, bookCoverWidth + 4, coverHeight + 4, 1);
-        renderer.drawRect(bookCoverX, coverY, bookCoverWidth, coverHeight, 1);
+        if (isFolder) {
+          renderer.drawRect(tileRect.x, tileRect.y, tileRect.width, tileRect.height, 1);
+
+          renderer.drawRect(tileRect.x + 2, tileRect.y + 2, tileRect.width - 4, tileRect.height - 4, 1);
+        } else {
+          renderer.drawRect(bookCoverX - 2, coverY - 2, bookCoverWidth + 4, coverHeight + 4, 1);
+
+          renderer.drawRect(bookCoverX, coverY, bookCoverWidth, coverHeight, 1);
+        }
       }
 
       bool renderedCover = false;
 
       if (isFolder) {
-        renderer.drawRect(coverX, coverY, coverWidth, coverHeight, 1);
+        std::string folderPath = basepath;
 
-        const int folderW = 72;
-        const int folderH = 48;
-        const int tabW = 30;
-        const int tabH = 12;
+        if (folderPath.back() != '/') {
+          folderPath += "/";
+        }
 
-        const int folderX = coverX + (coverWidth - folderW) / 2;
-        const int folderY = coverY + (coverHeight - folderH) / 2;
+        folderPath += file.substr(0, file.length() - 1);
 
-        renderer.drawRect(folderX + 6, folderY, tabW, tabH, 1);
-        renderer.drawRect(folderX, folderY + tabH - 2, folderW, folderH - tabH + 2, 1);
+        const auto folderEpubs = getFolderEpubs(folderPath, 3);
 
-        renderedCover = true;
+        const int coverCount = static_cast<int>(folderEpubs.size());
+        const int horizontalOffset = 26;
+        const int verticalOffset = 6;
+
+        const int previewHeight = coverHeight - 32;
+        const int previewWidth = previewHeight * 2 / 3;
+
+        const int stackWidth = previewWidth + std::max(0, coverCount - 1) * horizontalOffset;
+
+        const int stackX = coverX + (coverWidth - stackWidth) / 2;
+        const int stackY = coverY + 8;
+
+        for (int coverIndex = 0; coverIndex < coverCount; coverIndex++) {
+          const std::string& epubPath = folderEpubs[coverIndex];
+
+          Epub folderEpub(epubPath, "/.crosspoint");
+
+          if (!folderEpub.load(true, true)) {
+            continue;
+          }
+
+          const std::string coverTemplatePath = folderEpub.getThumbBmpPath();
+
+          if (coverTemplatePath.empty()) {
+            continue;
+          }
+
+          const int depth = coverCount - 1 - coverIndex;
+          const int currentHeight = previewHeight - depth * verticalOffset;
+
+          // Todas as capas usam a mesma dimensão de cache.
+          // O redimensionamento para a pilha é feito apenas ao desenhar.
+          const int sourceThumbnailHeight = coverHeight;
+
+          const std::string coverBmpPath = UITheme::getCoverThumbPath(coverTemplatePath, sourceThumbnailHeight);
+
+          if (!Storage.exists(coverBmpPath.c_str())) {
+            folderEpub.generateThumbBmp(sourceThumbnailHeight);
+          }
+
+          FsFile folderCoverFile;
+          Bitmap folderCoverBitmap(folderCoverFile);
+
+          if (!Storage.openFileForRead("LIB_FOLDER", coverBmpPath, folderCoverFile)) {
+            continue;
+          }
+
+          if (folderCoverBitmap.parseHeaders() != BmpReaderError::Ok) {
+            continue;
+          }
+
+          const int bitmapWidth = folderCoverBitmap.getWidth();
+          const int bitmapHeight = folderCoverBitmap.getHeight();
+
+          if (bitmapHeight <= 0) {
+            continue;
+          }
+
+          int renderedWidth = static_cast<int>(static_cast<float>(bitmapWidth) * static_cast<float>(currentHeight) /
+                                               static_cast<float>(bitmapHeight));
+
+          renderedWidth = std::min(renderedWidth, previewWidth);
+
+          const int currentX = stackX + coverIndex * horizontalOffset;
+          const int currentY = stackY + depth * verticalOffset;
+
+          // Fundo branco para esta capa, para tapar as capas de trás
+          renderer.fillRect(currentX - 2, currentY - 2, renderedWidth + 4, currentHeight + 4, 0);
+
+          // Moldura fina da capa
+          renderer.drawRect(currentX - 1, currentY - 1, renderedWidth + 2, currentHeight + 2, 1);
+
+          // Capa
+          renderer.drawBitmap(folderCoverBitmap, currentX, currentY, renderedWidth, currentHeight);
+
+          renderedCover = true;
+        }
+
+        if (!renderedCover) {
+          const int folderW = 72;
+          const int folderH = 48;
+          const int tabW = 30;
+          const int tabH = 12;
+
+          const int folderX = coverX + (coverWidth - folderW) / 2;
+          const int folderY = coverY + (coverHeight - folderH) / 2;
+
+          renderer.drawRect(folderX + 6, folderY, tabW, tabH, 1);
+          renderer.drawRect(folderX, folderY + tabH - 2, folderW, folderH - tabH + 2, 1);
+
+          renderedCover = true;
+        }
       } else {
         FsFile fileObj;
         Bitmap bitmap(fileObj);
