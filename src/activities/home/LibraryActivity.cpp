@@ -11,9 +11,11 @@
 #include "Bitmap.h"
 #include "CrossPointSettings.h"
 #include "Epub.h"
+#include "LibraryBookMenuActivity.h"
 #include "MappedInputManager.h"
 #include "RecentBooksStore.h"
 #include "Xtc.h"
+#include "activities/reader/EpubReaderUtils.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -160,6 +162,87 @@ void LibraryActivity::loop() {
       std::string cleanBasePath = basepath;
       if (cleanBasePath.back() != '/') cleanBasePath += "/";
       const std::string fullPath = cleanBasePath + entry;
+      if (!isDirectory && FsHelpers::hasEpubExtension(entry)) {
+        auto menuHandler = [this, fullPath, entry](const ActivityResult& res) {
+          if (res.isCancelled) {
+            return;
+          }
+
+          const auto* menuResult = std::get_if<MenuResult>(&res.data);
+
+          if (!menuResult) {
+            return;
+          }
+
+          const auto action = static_cast<LibraryBookMenuActivity::MenuAction>(menuResult->action);
+
+          Epub epub(fullPath, "/.crosspoint");
+
+          if (action == LibraryBookMenuActivity::MenuAction::MARK_AS_READ) {
+            if (!epub.load(false, true)) {
+              return;
+            }
+
+            const int spineCount = epub.getSpineItemsCount();
+
+            if (spineCount <= 0) {
+              return;
+            }
+
+            const int lastSpineIndex = spineCount - 1;
+
+            if (EpubReaderUtils::saveProgress(epub, lastSpineIndex, 1, 1)) {
+              requestUpdate(true);
+            }
+
+            return;
+          }
+
+          if (action == LibraryBookMenuActivity::MenuAction::CLEAR_PROGRESS) {
+            const std::string progressPath = epub.getCachePath() + "/progress.bin";
+
+            if (Storage.exists(progressPath.c_str())) {
+              Storage.remove(progressPath.c_str());
+            }
+
+            requestUpdate(true);
+            return;
+          }
+
+          if (action == LibraryBookMenuActivity::MenuAction::DELETE_BOOK) {
+            auto deleteHandler = [this, fullPath](const ActivityResult& confirmRes) {
+              if (confirmRes.isCancelled) {
+                return;
+              }
+
+              clearFileMetadata(fullPath);
+
+              if (Storage.remove(fullPath.c_str())) {
+                loadFiles();
+
+                if (files.empty()) {
+                  selectorIndex = 0;
+                } else if (selectorIndex >= files.size()) {
+                  selectorIndex = files.size() - 1;
+                }
+
+                requestUpdate(true);
+              }
+            };
+
+            std::string heading = tr(STR_DELETE) + std::string("? ");
+
+            startActivityForResult(std::make_unique<ConfirmationActivity>(renderer, mappedInput, heading, entry),
+                                   deleteHandler);
+
+            return;
+          }
+        };
+
+        startActivityForResult(std::make_unique<LibraryBookMenuActivity>(renderer, mappedInput, entry), menuHandler);
+
+        return;
+      }
 
       auto handler = [this, fullPath, isDirectory](const ActivityResult& res) {
         if (!res.isCancelled) {
@@ -342,6 +425,47 @@ static std::vector<std::string> getFolderEpubs(const std::string& folderPath, si
   return epubPaths;
 }
 
+static int getEpubProgressPercent(Epub& epub) {
+  FsFile progressFile;
+
+  const std::string progressPath = epub.getCachePath() + "/progress.bin";
+
+  if (!Storage.openFileForRead("LIB_PROGRESS", progressPath, progressFile)) {
+    return 0;
+  }
+
+  uint8_t data[6];
+  const int dataSize = progressFile.read(data, sizeof(data));
+
+  if (dataSize != 4 && dataSize != 6) {
+    return 0;
+  }
+
+  const int spineIndex = data[0] + (data[1] << 8);
+
+  const int currentPage = data[2] + (data[3] << 8);
+
+  if (currentPage == UINT16_MAX) {
+    return 0;
+  }
+
+  float chapterProgress = 0.0f;
+
+  if (dataSize == 6) {
+    const int pageCount = data[4] + (data[5] << 8);
+
+    if (pageCount > 0) {
+      chapterProgress = static_cast<float>(currentPage) / static_cast<float>(pageCount);
+    }
+  }
+
+  int percent = static_cast<int>(epub.calculateProgress(spineIndex, chapterProgress) * 100.0f + 0.5f);
+
+  percent = std::max(0, std::min(percent, 100));
+
+  return percent;
+}
+
 void LibraryActivity::render(RenderLock&&) {
   renderer.clearScreen();
 
@@ -430,7 +554,7 @@ void LibraryActivity::render(RenderLock&&) {
 
       const int coverX = tileRect.x + (tileRect.width - coverWidth) / 2;
       const int coverY = tileRect.y + 2;
-      const int titleY = coverY + coverHeight + 6;
+      const int titleY = coverY + coverHeight + 10;
 
       const int bookCoverWidth = coverHeight * 2 / 3;
       const int bookCoverX = coverX + (coverWidth - bookCoverWidth) / 2;
@@ -441,6 +565,7 @@ void LibraryActivity::render(RenderLock&&) {
 
       std::string displayTitle = fallbackLabel;
       std::string displayAuthor = "";
+      int bookProgressPercent = 0;
 
       if (selected) {
         if (isFolder) {
@@ -621,6 +746,12 @@ void LibraryActivity::render(RenderLock&&) {
             }
           }
 
+          if (bookProgressPercent == 0) {
+            if (epub.load(false, true)) {
+              bookProgressPercent = getEpubProgressPercent(epub);
+            }
+          }
+
           if (!coverTemplatePath.empty()) {
             const int thumbnailHeight = coverHeight;
 
@@ -689,6 +820,44 @@ void LibraryActivity::render(RenderLock&&) {
 
       if (!renderedCover) {
         renderer.drawRect(bookCoverX, coverY, bookCoverWidth, coverHeight, 1);
+      }
+
+      if (!isFolder && FsHelpers::hasEpubExtension(file) && bookProgressPercent > 0) {
+        const int progressBarHeight = 3;
+        const int progressBarY = coverY + coverHeight + 3;
+
+        // Fundo branco para a barra ficar legível sobre qualquer capa
+        renderer.fillRect(bookCoverX, progressBarY, bookCoverWidth, progressBarHeight, 0);
+
+        // Contorno
+        renderer.drawRect(bookCoverX, progressBarY, bookCoverWidth, progressBarHeight, 1);
+
+        // Preenchimento proporcional
+        const int progressInnerWidth = bookCoverWidth - 2;
+
+        const int progressFillWidth = progressInnerWidth * bookProgressPercent / 100;
+
+        if (progressFillWidth > 0) {
+          renderer.fillRect(bookCoverX + 1, progressBarY + 1, progressFillWidth, progressBarHeight - 2, 1);
+        }
+      }
+
+      if (!isFolder && FsHelpers::hasEpubExtension(file) && bookProgressPercent >= 99) {
+        const int badgeSize = 14;
+        const int badgeX = bookCoverX + bookCoverWidth - badgeSize - 3;
+        const int badgeY = coverY + 3;
+
+        // Fundo branco e contorno para o símbolo ser visível em qualquer capa
+        renderer.fillRect(badgeX, badgeY, badgeSize, badgeSize, 0);
+
+        renderer.drawRect(badgeX, badgeY, badgeSize, badgeSize, 1);
+
+        // Visto desenhado em píxeis
+        renderer.fillRect(badgeX + 3, badgeY + 7, 2, 2, 1);
+        renderer.fillRect(badgeX + 5, badgeY + 9, 2, 2, 1);
+        renderer.fillRect(badgeX + 7, badgeY + 7, 2, 2, 1);
+        renderer.fillRect(badgeX + 9, badgeY + 5, 2, 2, 1);
+        renderer.fillRect(badgeX + 11, badgeY + 3, 2, 2, 1);
       }
 
       std::string titleLine1 = displayTitle;
